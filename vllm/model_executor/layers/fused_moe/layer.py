@@ -1246,6 +1246,33 @@ class FusedMoE(CustomOp):
 
         # TODO @dsikka: ModelOpt should follow the proper MoE loading pattern
         if "ModelOpt" in quant_method_name:
+            # Handle unquantized MoE expert weights (ModelOpt may not quantize them)
+            import torch
+            if ("NvFp4" in quant_method_name
+                and "weight" in weight_name
+                and "scale" not in weight_name
+                and loaded_weight.dtype in (torch.bfloat16, torch.float16, torch.float32)
+                and param.data.dtype == torch.uint8):
+                logger.warning_once(
+                    f"NVFP4 checkpoint has unquantized MoE weights "
+                    f"(got {loaded_weight.dtype}, expected uint8). "
+                    f"Falling back to unquantized loading."
+                )
+                # Resize param for unquantized weights (FP4 packing halves the last dim)
+                old_shape = list(param.data.shape)
+                new_shape = old_shape.copy()
+                new_shape[-1] = new_shape[-1] * 2
+                new_data = torch.zeros(new_shape, dtype=loaded_weight.dtype, device=param.data.device)
+                param.data = new_data
+                expert_data = param.data if full_load else param.data[expert_id]
+                self._load_model_weight_or_group_weight_scale(
+                    shard_id=shard_id,
+                    shard_dim=shard_dim,
+                    loaded_weight=loaded_weight,
+                    expert_data=expert_data,
+                    tp_rank=self.tp_rank,
+                )
+                return True if return_success else None
             # Determine per-tensor weight scale patterns based on variant
             # Use the dedicated method instead of brittle string matching
             uses_weight_scale_2 = self.quant_method.uses_weight_scale_2_pattern()

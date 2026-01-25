@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
 )
+from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
@@ -954,6 +955,28 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # Handle unquantized MoE weights (fallback path)
+        if getattr(self, '_unquantized_moe', False):
+            from vllm.model_executor.layers.fused_moe import fused_topk
+            topk_weights, topk_ids = fused_topk(
+                hidden_states=x,
+                gating_output=router_logits,
+                topk=layer.top_k,
+                renormalize=layer.renormalize,
+            )
+            return fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=False,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+            )
+
         assert self.is_monolithic
         assert self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
         if layer.enable_eplb:
@@ -985,6 +1008,21 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # Handle unquantized MoE weights (fallback path)
+        if getattr(self, '_unquantized_moe', False):
+            return fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=False,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+            )
+
         assert not self.is_monolithic
 
         # TODO(rob): this validation should happen at kernel selection
@@ -1530,6 +1568,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
+        # Check if weights are unquantized (bfloat16/float16 instead of uint8)
+        if layer.w13_weight.dtype != torch.uint8:
+            logger.warning_once(
+                f"NVFP4 MoE weights are unquantized (dtype={layer.w13_weight.dtype}). "
+                f"Using unquantized fallback for MoE inference."
+            )
+            self._unquantized_moe = True
+            # Keep weights as-is for unquantized path
+            return
+
+        self._unquantized_moe = False
 
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(
@@ -1646,6 +1695,28 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # Handle unquantized MoE weights (fallback path)
+        if getattr(self, '_unquantized_moe', False):
+            from vllm.model_executor.layers.fused_moe import fused_topk
+            topk_weights, topk_ids = fused_topk(
+                hidden_states=x,
+                gating_output=router_logits,
+                topk=layer.top_k,
+                renormalize=layer.renormalize,
+            )
+            return fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=False,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+            )
+
         assert self.is_monolithic
         assert (
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
@@ -1672,6 +1743,21 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # Handle unquantized MoE weights (fallback path)
+        if getattr(self, '_unquantized_moe', False):
+            return fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=False,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+            )
+
         assert not self.is_monolithic
 
         # EPLB path
